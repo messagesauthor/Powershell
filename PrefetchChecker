@@ -1,0 +1,195 @@
+# Prefetch Status and Modification Check
+Write-Host "=== PREFETCH STATUS & MODIFICATION CHECK ===" -ForegroundColor Cyan
+Write-Host ""
+
+# Check if running as Administrator
+$isAdmin = [System.Security.Principal.WindowsPrincipal]::new([System.Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    Write-Host "WARNING: Some checks require Administrator privileges" -ForegroundColor Yellow
+    Write-Host ""
+}
+
+# Get system boot time
+try {
+    $bootTime = (Get-CimInstance -ClassName Win32_OperatingSystem).LastBootUpTime
+    Write-Host "SYSTEM BOOT TIME: $($bootTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor White
+    Write-Host ""
+} catch {
+    Write-Host "Unable to retrieve boot time information" -ForegroundColor Red
+    $bootTime = $null
+}
+
+# Check Prefetch registry settings
+Write-Host "PREFETCH REGISTRY SETTINGS:" -ForegroundColor Cyan
+
+$prefetchRegPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters"
+$enablePrefetcher = Get-ItemProperty -Path $prefetchRegPath -Name "EnablePrefetcher" -ErrorAction SilentlyContinue
+$enableSuperfetch = Get-ItemProperty -Path $prefetchRegPath -Name "EnableSuperfetch" -ErrorAction SilentlyContinue
+
+if ($enablePrefetcher -and $enablePrefetcher.EnablePrefetcher -ne 0) {
+    Write-Host "  EnablePrefetcher: " -NoNewline -ForegroundColor White
+    switch ($enablePrefetcher.EnablePrefetcher) {
+        0 { Write-Host "Disabled" -ForegroundColor Red }
+        1 { Write-Host "Application Prefetch Enabled" -ForegroundColor Green }
+        2 { Write-Host "Boot Prefetch Enabled" -ForegroundColor Green }
+        3 { Write-Host "Both Application and Boot Prefetch Enabled" -ForegroundColor Green }
+        default { Write-Host "Unknown ($_)" -ForegroundColor Yellow }
+    }
+} else {
+    Write-Host "  EnablePrefetcher: Disabled or Not Set" -ForegroundColor Red
+}
+
+if ($enableSuperfetch) {
+    Write-Host "  EnableSuperfetch: " -NoNewline -ForegroundColor White
+    switch ($enableSuperfetch.EnableSuperfetch) {
+        0 { Write-Host "Disabled" -ForegroundColor Red }
+        1 { Write-Host "Boot Prefetch Only" -ForegroundColor Green }
+        2 { Write-Host "Application Prefetch Only" -ForegroundColor Green }
+        3 { Write-Host "Both Boot and Application Prefetch" -ForegroundColor Green }
+        default { Write-Host "Unknown ($_)" -ForegroundColor Yellow }
+    }
+} else {
+    Write-Host "  EnableSuperfetch: Not Configured (System Default)" -ForegroundColor Gray
+}
+
+Write-Host ""
+
+# Check Prefetch folder status
+$prefetchPath = "$env:SystemRoot\Prefetch"
+Write-Host "PREFETCH FOLDER ANALYSIS:" -ForegroundColor Cyan
+Write-Host "  Path: $prefetchPath" -ForegroundColor Gray
+
+if (Test-Path $prefetchPath) {
+    $prefetchFolder = Get-Item $prefetchPath -Force
+    $files = Get-ChildItem -Path $prefetchPath -Filter "*.pf" -Force -ErrorAction SilentlyContinue
+    
+    Write-Host "  Folder Exists: Yes" -ForegroundColor Green
+    Write-Host "  Total .pf files: $($files.Count)" -ForegroundColor White
+    
+    # Check folder permissions
+    try {
+        $acl = Get-Acl $prefetchPath
+        Write-Host "  Folder Access: Accessible" -ForegroundColor Green
+    } catch {
+        Write-Host "  Folder Access: Access Denied" -ForegroundColor Red
+    }
+    
+    Write-Host ""
+    
+    # Check for modifications since boot
+    if ($bootTime) {
+        Write-Host "MODIFICATIONS SINCE BOOT:" -ForegroundColor Cyan
+        
+        # Check folder modification time
+        $folderModified = $prefetchFolder.LastWriteTime -gt $bootTime
+        Write-Host "  Folder Modified Since Boot: " -NoNewline -ForegroundColor White
+        if ($folderModified) {
+            Write-Host "YES" -ForegroundColor Red
+            Write-Host "    Last Modified: $($prefetchFolder.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor Yellow
+        } else {
+            Write-Host "No" -ForegroundColor Green
+        }
+        
+        # Check for modified files since boot
+        $modifiedFiles = @()
+        $newFiles = @()
+        $deletedFilesInfo = $null
+        
+        if ($files) {
+            $modifiedFiles = $files | Where-Object { $_.LastWriteTime -gt $bootTime }
+            $newFiles = $files | Where-Object { $_.CreationTime -gt $bootTime }
+            
+            Write-Host "  Modified .pf Files: $($modifiedFiles.Count)" -ForegroundColor White
+            Write-Host "  New .pf Files: $($newFiles.Count)" -ForegroundColor White
+            
+            if ($modifiedFiles.Count -gt 0) {
+                Write-Host "`n  RECENTLY MODIFIED FILES:" -ForegroundColor Yellow
+                $modifiedFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 10 | ForEach-Object {
+                    Write-Host "    $($_.Name) - Modified: $($_.LastWriteTime.ToString('HH:mm:ss'))" -ForegroundColor White
+                }
+                if ($modifiedFiles.Count -gt 10) {
+                    Write-Host "    ... and $($modifiedFiles.Count - 10) more files" -ForegroundColor Gray
+                }
+            }
+            
+            if ($newFiles.Count -gt 0) {
+                Write-Host "`n  RECENTLY CREATED FILES:" -ForegroundColor Yellow
+                $newFiles | Sort-Object CreationTime -Descending | Select-Object -First 10 | ForEach-Object {
+                    Write-Host "    $($_.Name) - Created: $($_.CreationTime.ToString('HH:mm:ss'))" -ForegroundColor White
+                }
+                if ($newFiles.Count -gt 10) {
+                    Write-Host "    ... and $($newFiles.Count - 10) more files" -ForegroundColor Gray
+                }
+            }
+            
+            # Check for suspicious activity
+            $recentlyModifiedCount = $modifiedFiles.Count
+            $recentlyCreatedCount = $newFiles.Count
+            
+            Write-Host "`n  ACTIVITY ASSESSMENT:" -ForegroundColor Cyan
+            if ($recentlyModifiedCount -eq 0 -and $recentlyCreatedCount -eq 0) {
+                Write-Host "    No file modifications since boot - Normal" -ForegroundColor Green
+            } elseif ($recentlyCreatedCount -le 5 -and $recentlyModifiedCount -le 10) {
+                Write-Host "    Low activity - Likely normal system operation" -ForegroundColor Green
+            } elseif ($recentlyCreatedCount -le 15 -and $recentlyModifiedCount -le 30) {
+                Write-Host "    Moderate activity - May be normal" -ForegroundColor Yellow
+            } else {
+                Write-Host "    High activity - Unusual number of changes since boot" -ForegroundColor Red
+            }
+        }
+    } else {
+        Write-Host "  Cannot check modifications - Boot time unavailable" -ForegroundColor Yellow
+    }
+    
+    # Additional integrity checks
+    Write-Host "`nADDITIONAL CHECKS:" -ForegroundColor Cyan
+    
+    # Check for hidden files
+    $hiddenFiles = $files | Where-Object { $_.Attributes -band [System.IO.FileAttributes]::Hidden }
+    Write-Host "  Hidden .pf files: $($hiddenFiles.Count)" -ForegroundColor $(if ($hiddenFiles.Count -gt 0) { 'Yellow' } else { 'Green' })
+    
+    # Check for read-only files
+    $readOnlyFiles = $files | Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReadOnly }
+    Write-Host "  Read-only .pf files: $($readOnlyFiles.Count)" -ForegroundColor $(if ($readOnlyFiles.Count -gt 0) { 'Yellow' } else { 'Green' })
+    
+    # Check file signatures (basic check)
+    $invalidSignatureCount = 0
+    if ($files) {
+        foreach ($file in $files | Select-Object -First 5) {
+            try {
+                $stream = [System.IO.File]::OpenRead($file.FullName)
+                $reader = New-Object System.IO.BinaryReader($stream)
+                $signature = [System.Text.Encoding]::ASCII.GetString($reader.ReadBytes(3))
+                $reader.Close()
+                $stream.Close()
+                
+                if ($signature -ne "MAM") {
+                    $invalidSignatureCount++
+                }
+            } catch {
+                # Ignore errors for this check
+            }
+        }
+    }
+    Write-Host "  Files with invalid signatures: $invalidSignatureCount" -ForegroundColor $(if ($invalidSignatureCount -gt 0) { 'Red' } else { 'Green' })
+    
+} else {
+    Write-Host "  Folder Exists: No" -ForegroundColor Red
+    Write-Host "  Status: Prefetch folder not found - Feature may be disabled" -ForegroundColor Yellow
+}
+
+Write-Host ""
+Write-Host "SUMMARY:" -ForegroundColor Cyan
+if ($enablePrefetcher -and $enablePrefetcher.EnablePrefetcher -ne 0) {
+    Write-Host "  Prefetch is: ENABLED" -ForegroundColor Green
+} else {
+    Write-Host "  Prefetch is: DISABLED" -ForegroundColor Red
+}
+
+if ($bootTime -and (Test-Path $prefetchPath)) {
+    $hasRecentActivity = (Get-ChildItem $prefetchPath -Force -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -gt $bootTime }).Count -gt 0
+    Write-Host "  Recent modifications: $(if ($hasRecentActivity) { 'YES' } else { 'NO' })" -ForegroundColor $(if ($hasRecentActivity) { 'Yellow' } else { 'Green' })
+}
+
+Write-Host ""
+Write-Host "Check complete." -ForegroundColor Gray
