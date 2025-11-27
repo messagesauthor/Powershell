@@ -1,0 +1,43 @@
+# SS Folder Creation Script - Minimal Output
+# Requires Administrator privileges
+
+# Check if running as Administrator
+$currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Host "Please run as Administrator" -ForegroundColor Red
+    exit
+}
+
+# Define folder path
+$folderPath = "C:\SS"
+
+try {
+    # Create the folder if it doesn't exist
+    if (-not (Test-Path $folderPath)) {
+        New-Item -ItemType Directory -Path $folderPath -Force | Out-Null
+    }
+
+    # Add Windows Defender exclusion
+    $defenderStatus = Get-Service -Name WinDefend -ErrorAction SilentlyContinue
+    if ($defenderStatus -and $defenderStatus.Status -eq 'Running') {
+        Add-MpPreference -ExclusionPath $folderPath -ErrorAction SilentlyContinue | Out-Null
+    }
+
+    # Set folder permissions
+    $acl = Get-Acl $folderPath
+    $accessRule = New-Object System.Security.AccessControl.FileSystemAccessRule("Users", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+    $acl.AddAccessRule($accessRule)
+    Set-Acl -Path $folderPath -AclObject $acl | Out-Null
+
+    # Open the folder
+    Start-Process "explorer.exe" -ArgumentList $folderPath | Out-Null
+
+    # Clear console and show success message
+    Clear-Host
+    Write-Host "folder created successfully" -ForegroundColor Green
+}
+catch {
+    # Clear console and show error
+    Clear-Host
+    Write-Host "error creating folder" -ForegroundColor Red
+}
